@@ -320,6 +320,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.info("Deleted %d images from Samsung Frame", deleted)
         except Exception as exc:
             _LOGGER.error("Failed to delete TV images: %s", exc)
+            raise
 
     hass.services.async_register(
         DOMAIN, "delete_all_tv_images", handle_delete_all_images, schema=vol.Schema({})
@@ -373,53 +374,14 @@ def _send_art_request(conn, data: dict):
 
 
 def _delete_all_tv_images(tv_ip: str, token_file: str) -> int:
-    """
-    Query the TV for all uploaded images in MY category and delete them one by one.
-    Returns the number of images deleted.
-    """
-    import time
+    """Delete only uploaded MY_ images and verify their removal from the TV."""
+    from .art_protocol import delete_user_images
+
     conn = _art_connect(tv_ip, token_file)
-    deleted = 0
     try:
-        # Request content list (category MY = user-uploaded images)
-        _send_art_request(conn, {"request": "get_content_list", "category": "MY"})
-
-        content_list = []
-        for _ in range(15):
-            try:
-                raw = conn.recv()
-            except Exception:
-                break
-            resp = json.loads(raw)
-            if resp.get("event") == "d2d_service_message":
-                data_str = resp.get("data", "{}")
-                data = json.loads(data_str) if isinstance(data_str, str) else data_str
-                if data.get("event") == "content_list":
-                    items = data.get("content_list", [])
-                    if isinstance(items, str):
-                        items = json.loads(items)
-                    content_list = items
-                    break
-
-        _LOGGER.info("Found %d images on TV to delete", len(content_list))
-
-        # Delete one by one
-        for item in content_list:
-            content_id = item.get("content_id") or item.get("id")
-            if not content_id:
-                continue
-            _LOGGER.info("Deleting content_id=%s", content_id)
-            _send_art_request(conn, {
-                "request": "delete_image_list",
-                "content_id_list": [{"content_id": content_id}],
-            })
-            # Brief pause between deletes to avoid overwhelming the TV
-            time.sleep(0.3)
-            deleted += 1
-
+        return delete_user_images(conn, _send_art_request)
     finally:
         conn.close()
-    return deleted
 
 
 def _set_brightness(tv_ip: str, token_file: str, brightness: int) -> None:
