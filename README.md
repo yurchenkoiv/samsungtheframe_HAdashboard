@@ -1,7 +1,24 @@
+## LS03A compatibility fork
+
+This fork includes fixes tested by a user on a 2021 Samsung Frame LS03A (Art API 2.03):
+
+- Detect the Art API version and use D2D TCP upload for API 2.x+, retaining the legacy WebSocket upload path.
+- Send correlated select-image requests so uploaded artwork is displayed automatically.
+- Avoid assigning the read-only OptionsFlow config_entry property on current Home Assistant versions.
+- Reload through Home Assistant's config-entry lifecycle manager instead of directly calling integration unload/setup. The user confirmed this resolved a freeze when saving matte options.
+
+For HACS, add `https://github.com/yurchenkoiv/samsungtheframe_HAdashboard` as a custom repository of type **Integration**, download it, and restart Home Assistant. For manual installation, copy `custom_components/samsung_frame` to `/config/custom_components/samsung_frame` and restart. Back up existing files first. Do not install duplicate copies of this integration.
+
+Choose `none` for the TV matte option (`matte_color`) to remove the TV-added border; Digital Matte Type is a separate compositor setting. Keep Debug Save off unless diagnosing images. Each refresh uploads a new TV photo; this fork does not add automatic photo cleanup or a refresh schedule. Never use Delete All TV Images unless you intend to remove all user-uploaded artwork.
+
+Run dependency-free regression tests with `python -m unittest discover -s tests -v`. Tests cover protocol helpers and lifecycle/OptionsFlow regressions, not a full Home Assistant runtime or all TV models. No credentials or personal configuration are included.
+
+---
+
 # Samsung Frame Art 
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
-[![GitHub release](https://img.shields.io/github/release/YOUR_GITHUB_USERNAME/samsung_frame_art.svg)](https://github.com/YOUR_GITHUB_USERNAME/samsung_frame_art/releases)
+[![GitHub release](https://img.shields.io/github/release/yurchenkoiv/samsungtheframe_HAdashboard.svg)](https://github.com/yurchenkoiv/samsungtheframe_HAdashboard/releases)
 
 A Home Assistant custom integration that pushes randomly selected images with an elegant overlay to your **Samsung The Frame TV** — including full support for the **2019 model**.
 
@@ -29,7 +46,7 @@ A Home Assistant custom integration that pushes randomly selected images with an
 ## Installation via HACS
 
 1. In HACS, go to **Integrations → Custom Repositories**
-2. Add `https://github.com/balazsskorka/samsung_frame_art` as an **Integration**
+2. Add `https://github.com/yurchenkoiv/samsungtheframe_HAdashboard` as an **Integration**
 3. Search for **Samsung Frame Art** and install
 4. Restart Home Assistant
 5. Go to **Settings → Devices & Services → Add Integration** → search **Samsung Frame Art**

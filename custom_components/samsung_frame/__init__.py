@@ -6,6 +6,7 @@ import os
 import random
 import json
 import ssl
+import socket
 import uuid
 import base64
 from datetime import date, datetime, timedelta
@@ -453,39 +454,109 @@ def _recv_until(conn, sub_events, max_msgs=15):
 
 
 def _push_to_tv(tv_ip, token_file, jpeg_bytes, matte):
-    """Push image using WebSocket binary frame (Art API 0.97 — 2019 Frame)."""
+    """Upload/select artwork with the transport required by the TV's Art API."""
     import time
+    from .art_protocol import build_d2d_header, build_select_request, upload_mode_for_api
+
     conn = _art_connect(tv_ip, token_file)
     try:
+        conn.settimeout(30)
+        version = None
+        for request_name in ("api_version", "get_api_version"):
+            request_id = str(uuid.uuid4())
+            _send_art_request(conn, {
+                "request": request_name,
+                "id": request_id,
+                "request_id": request_id,
+            })
+            version_reply = _recv_until(conn, ["api_version", "error"], max_msgs=10)
+            if version_reply and version_reply.get("version"):
+                version = str(version_reply["version"])
+                break
 
-        upload_id = str(uuid.uuid4())
-        inner = {"request": "send_image", "file_type": "JPEG", "matte_id": matte or "none", "id": upload_id}
-        outer = {"method": "ms.channel.emit", "params": {"data": json.dumps(inner), "to": "host", "event": "art_app_request"}}
-        header = json.dumps(outer, separators=(",", ":")).encode("utf-8")
-        payload = len(header).to_bytes(2, "big") + header + jpeg_bytes
-        conn.send_binary(payload)
+        mode = upload_mode_for_api(version)
+        _LOGGER.info("Samsung Frame Art API version=%s upload_mode=%s", version, mode)
 
-        data = _recv_until(conn, ["image_added", "error"])
-        if data is None:
-            _LOGGER.warning("No image_added confirmation")
-            return
-        if data.get("event") == "error":
-            raise RuntimeError(f"TV error: {data}")
-
-        content_id = data.get("content_id")
-        _LOGGER.info("Image added, content_id=%s", content_id)
-
-        if content_id:
-            conn.send(json.dumps({
+        if mode == "websocket_binary":
+            upload_id = str(uuid.uuid4())
+            inner = {
+                "request": "send_image",
+                "file_type": "JPEG",
+                "matte_id": matte or "none",
+                "id": upload_id,
+            }
+            outer = {
                 "method": "ms.channel.emit",
                 "params": {
-                    "event": "art_app_request",
+                    "data": json.dumps(inner),
                     "to": "host",
-                    "data": json.dumps({"request": "select_image", "content_id": content_id, "show": True}),
+                    "event": "art_app_request",
                 },
-            }))
-            time.sleep(1)
+            }
+            header = json.dumps(outer, separators=(",", ":")).encode("utf-8")
+            conn.send_binary(len(header).to_bytes(2, "big") + header + jpeg_bytes)
+            data = _recv_until(conn, ["image_added", "error"], max_msgs=20)
+        else:
+            upload_id = str(uuid.uuid4())
+            art_id = str(uuid.uuid4())
+            file_type = "jpg"
+            _send_art_request(conn, {
+                "request": "send_image",
+                "request_id": upload_id,
+                "id": art_id,
+                "conn_info": {
+                    "d2d_mode": "socket",
+                    "connection_id": random.randrange(4 * 1024 * 1024 * 1024),
+                    "id": art_id,
+                },
+                "image_date": datetime.now().strftime("%Y:%m:%d %H:%M:%S"),
+                "matte_id": matte or "none",
+                "portrait_matte_id": matte or "none",
+                "file_type": file_type,
+                "file_size": len(jpeg_bytes),
+            })
+            ready = _recv_until(conn, ["ready_to_use", "error"], max_msgs=20)
+            if not ready or ready.get("event") == "error":
+                raise RuntimeError(f"TV did not authorize D2D image transfer: {ready}")
 
+            conn_info = ready.get("conn_info")
+            if isinstance(conn_info, str):
+                conn_info = json.loads(conn_info)
+            if not isinstance(conn_info, dict) or not conn_info.get("ip") or not conn_info.get("port"):
+                raise RuntimeError(f"TV returned invalid D2D connection info: {ready}")
+
+            transfer_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            transfer_socket.settimeout(30)
+            if conn_info.get("secured"):
+                time.sleep(0.1)
+                context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
+                transfer_socket = context.wrap_socket(transfer_socket)
+            try:
+                transfer_socket.connect((conn_info["ip"], int(conn_info["port"])))
+                transfer_socket.sendall(build_d2d_header(
+                    len(jpeg_bytes), file_type, conn_info.get("key", "")
+                ))
+                transfer_socket.sendall(jpeg_bytes)
+            finally:
+                transfer_socket.close()
+            data = _recv_until(conn, ["image_added", "error"], max_msgs=20)
+
+        if data is None:
+            raise RuntimeError("TV did not confirm the uploaded image (no image_added event)")
+        if data.get("event") == "error":
+            raise RuntimeError(f"TV rejected image upload: {data}")
+
+        content_id = data.get("content_id")
+        if not content_id:
+            raise RuntimeError(f"TV confirmed upload without a content_id: {data}")
+        _LOGGER.info("Image added, content_id=%s", content_id)
+
+        select_request_id = str(uuid.uuid4())
+        _send_art_request(conn, build_select_request(content_id, select_request_id))
+        _LOGGER.info("Requested display of uploaded artwork, content_id=%s", content_id)
+        time.sleep(1)
     finally:
         conn.close()
 
@@ -498,5 +569,4 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    await async_unload_entry(hass, entry)
-    await async_setup_entry(hass, entry)
+    await hass.config_entries.async_reload(entry.entry_id)
