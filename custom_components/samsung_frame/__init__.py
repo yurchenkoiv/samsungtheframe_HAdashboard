@@ -41,7 +41,7 @@ from .overlay import compose_overlay
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = ["button", "image", "number", "select", "switch", "text"]
+PLATFORMS = ["button", "image", "number", "select", "sensor", "switch", "text"]
 
 SERVICE_UPDATE_SCHEMA = vol.Schema({
     vol.Optional("image_path"): cv.string,
@@ -328,7 +328,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 
-def _art_connect(tv_ip, token_file):
+def _art_connect(tv_ip, token_file, *, persist_token=True):
     """Open and handshake the art WebSocket channel. Returns open conn."""
     import websocket as ws_lib
     name_b64 = base64.b64encode(b"SamsungTvRemote").decode("utf-8")
@@ -344,19 +344,23 @@ def _art_connect(tv_ip, token_file):
     if token:
         art_url += f"&token={token}"
     conn = ws_lib.create_connection(art_url, timeout=10, sslopt=sslopt)
-    conn.settimeout(8)
-    for _ in range(10):
-        raw = conn.recv()
-        resp = json.loads(raw)
-        event = resp.get("event", "")
-        if event == "ms.channel.connect":
-            new_token = resp.get("data", {}).get("token")
-            if new_token and token_file:
-                with open(token_file, "w") as f:
-                    f.write(new_token)
-        elif event == "ms.channel.ready":
-            break
-    return conn
+    try:
+        conn.settimeout(8)
+        for _ in range(10):
+            raw = conn.recv()
+            resp = json.loads(raw)
+            event = resp.get("event", "")
+            if event == "ms.channel.connect":
+                new_token = resp.get("data", {}).get("token")
+                if new_token and token_file and persist_token:
+                    with open(token_file, "w") as f:
+                        f.write(new_token)
+            elif event == "ms.channel.ready":
+                break
+        return conn
+    except BaseException:
+        conn.close()
+        raise
 
 
 def _send_art_request(conn, data: dict):
@@ -371,8 +375,8 @@ def _send_art_request(conn, data: dict):
     }))
 
 
-def _require_art_mode_on_connection(conn):
-    """Require an explicit fresh on response; errors and ambiguity fail closed."""
+def _read_art_mode_on_connection(conn):
+    """Return an explicit fresh on/off response, or None if unconfirmed."""
     import time
     request_id = str(uuid.uuid4())
     _send_art_request(conn, {"request": "get_artmode_status", "id": request_id,
@@ -396,12 +400,21 @@ def _require_art_mode_on_connection(conn):
             if any(data.get(k) is not None and data[k] != request_id
                    for k in ("request_id", "id")):
                 continue
-            if data.get("value") == "on":
-                return
-            raise RuntimeError("Art Mode is not on; update deferred")
+            if data.get("value") in ("on", "off"):
+                return data["value"]
+            return None
         except (ValueError, TypeError):
             continue
-    raise RuntimeError("Cannot confirm Art Mode; update deferred")
+    return None
+
+
+def _require_art_mode_on_connection(conn):
+    """Require an explicit fresh on response; errors and ambiguity fail closed."""
+    status = _read_art_mode_on_connection(conn)
+    if status == "off":
+        raise RuntimeError("Art Mode is not on; update deferred")
+    if status != "on":
+        raise RuntimeError("Cannot confirm Art Mode; update deferred")
 
 
 def _require_art_mode(tv_ip, token_file):

@@ -8,7 +8,7 @@ from unittest.mock import Mock
 
 source = (Path(__file__).resolve().parents[1] / 'custom_components/samsung_frame/__init__.py').read_text()
 tree = ast.parse(source)
-nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('_require_art_mode_on_connection', '_require_art_mode')]
+nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('_read_art_mode_on_connection', '_require_art_mode_on_connection', '_require_art_mode')]
 ns = {'json': json, 'uuid': uuid}
 exec(compile(ast.Module(body=nodes, type_ignores=[]), '<integration>', 'exec'), ns)
 
