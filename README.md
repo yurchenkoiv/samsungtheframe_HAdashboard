@@ -11,6 +11,8 @@ For HACS, add `https://github.com/yurchenkoiv/samsungtheframe_HAdashboard` as a 
 
 Choose `none` for the TV matte option (`matte_color`) to remove the TV-added border; Digital Matte Type is a separate compositor setting. Keep Debug Save off unless diagnosing images. Each refresh uploads a new TV photo; this fork does not add automatic photo cleanup or a refresh schedule. Never use Delete All TV Images unless you intend to remove all user-uploaded artwork.
 
+The update service checks for an explicit Art Mode `on` response before choosing an image, before upload, and again before selection. Off, unknown, missing, or failed status checks abort the update; some TVs may not provide a compatible response. These checks are snapshots, not a lock: Art Mode can change between a check and the next action, and an upload may remain on the TV if the final check fails. The select request is sent without waiting for a selection acknowledgement, so sending it does not prove the artwork is displayed. Update failures now raise errors so automations can detect them.
+
 Run dependency-free regression tests with `python -m unittest discover -s tests -v`. Tests cover protocol helpers and lifecycle/OptionsFlow regressions, not a full Home Assistant runtime or all TV models. No credentials or personal configuration are included.
 
 ---

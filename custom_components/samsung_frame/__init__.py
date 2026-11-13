@@ -139,6 +139,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.info("font_size=%s opacity=%s show_date=%s show_calendar=%s show_weather=%s days=%s folder=%s file=%s",
                      font_size, opacity, show_date, show_calendar, show_weather, upcoming_days, media_folder, fname or "random")
 
+        await hass.async_add_executor_job(_require_art_mode, tv_ip, token_file)
+
         # ── Resolve image path ────────────────────────────────────────────────
         if not image_path:
             if fname:
@@ -148,8 +150,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 else:
                     image_path = os.path.join(media_folder, fname)
                 if not os.path.exists(image_path):
-                    _LOGGER.error("Specified file not found: %s", image_path)
-                    return
+                    raise RuntimeError(f"Specified file not found: {image_path}")
             else:
                 def _list_images(folder):
                     if not os.path.isdir(folder):
@@ -180,8 +181,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 ]
             images = await hass.async_add_executor_job(_list_images, media_folder)
             if not images:
-                _LOGGER.error("No images found in %s", media_folder)
-                return
+                raise RuntimeError(f"No images found in {media_folder}")
             image_path = random.choice(images)
             _LOGGER.info("Selected image: %s", image_path)
 
@@ -270,8 +270,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 compose_overlay, image_path, lang, events, opacity, font_size, show_date, show_calendar, show_weather, forecast, matte_type, matte_color
             )
         except Exception as exc:
-            _LOGGER.error("Failed to compose overlay: %s", exc)
-            return
+            raise RuntimeError(f"Failed to compose overlay: {exc}") from exc
 
         # ── Update image entity ───────────────────────────────────────────────
         image_entity = hass.data[DOMAIN].get(f"{entry.entry_id}_image_entity")
@@ -295,8 +294,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _push_to_tv, tv_ip, token_file, jpeg_bytes, matte
             )
         except Exception as exc:
-            _LOGGER.error("Failed to push image to TV: %s", exc)
-            return
+            raise RuntimeError(f"Failed to push image to TV: {exc}") from exc
 
         _LOGGER.info("Successfully pushed art to Samsung Frame at %s", tv_ip)
 
@@ -373,6 +371,47 @@ def _send_art_request(conn, data: dict):
     }))
 
 
+def _require_art_mode_on_connection(conn):
+    """Require an explicit fresh on response; errors and ambiguity fail closed."""
+    import time
+    request_id = str(uuid.uuid4())
+    _send_art_request(conn, {"request": "get_artmode_status", "id": request_id,
+                             "request_id": request_id})
+    deadline = time.monotonic() + 8
+    for _ in range(15):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        conn.settimeout(remaining)
+        try:
+            msg = json.loads(conn.recv())
+            if not isinstance(msg, dict) or msg.get("event") != "d2d_service_message":
+                continue
+            data = msg.get("data")
+            if isinstance(data, str):
+                data = json.loads(data)
+            if not isinstance(data, dict) or data.get("event") != "artmode_status":
+                continue
+            # Some TVs omit correlation fields. Reject mismatches when present.
+            if any(data.get(k) is not None and data[k] != request_id
+                   for k in ("request_id", "id")):
+                continue
+            if data.get("value") == "on":
+                return
+            raise RuntimeError("Art Mode is not on; update deferred")
+        except (ValueError, TypeError):
+            continue
+    raise RuntimeError("Cannot confirm Art Mode; update deferred")
+
+
+def _require_art_mode(tv_ip, token_file):
+    conn = _art_connect(tv_ip, token_file)
+    try:
+        _require_art_mode_on_connection(conn)
+    finally:
+        conn.close()
+
+
 def _delete_all_tv_images(tv_ip: str, token_file: str) -> int:
     """Delete only uploaded MY_ images and verify their removal from the TV."""
     from .art_protocol import delete_user_images
@@ -422,6 +461,7 @@ def _push_to_tv(tv_ip, token_file, jpeg_bytes, matte):
 
     conn = _art_connect(tv_ip, token_file)
     try:
+        _require_art_mode_on_connection(conn)
         conn.settimeout(30)
         version = None
         for request_name in ("api_version", "get_api_version"):
@@ -515,6 +555,7 @@ def _push_to_tv(tv_ip, token_file, jpeg_bytes, matte):
             raise RuntimeError(f"TV confirmed upload without a content_id: {data}")
         _LOGGER.info("Image added, content_id=%s", content_id)
 
+        _require_art_mode_on_connection(conn)
         select_request_id = str(uuid.uuid4())
         _send_art_request(conn, build_select_request(content_id, select_request_id))
         _LOGGER.info("Requested display of uploaded artwork, content_id=%s", content_id)
